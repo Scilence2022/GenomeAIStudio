@@ -515,6 +515,14 @@ class FunctionCallsOrganizer {
     }
   }
 
+  getExecutionMetadata(toolName, parameters = {}, context = {}) {
+    return this.chatManager?.getCapabilityRegistry?.()?.getExecutionMetadata?.(toolName, parameters, context) || null;
+  }
+
+  compileToolCallPlan(toolCalls, options = {}) {
+    return this.chatManager?.getToolCallPlanCompiler?.()?.compile?.(toolCalls, options) || null;
+  }
+
   mapRegistryCategoryToFunctionCategory(tool = {}) {
     const category = tool.category || '';
     const toolName = String(tool.name || '');

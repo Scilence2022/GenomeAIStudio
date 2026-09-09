@@ -46,6 +46,7 @@ class ChatBoxSettingsManager {
       dynamicToolsSelectionLimit: 24, // High-recall default for automatic workflows
       enableNativeFunctionCalling: true,
       enableConstrainedToolOutput: true,
+      enableExecutionGraphScheduler: false,
 
       // Tool priority settings
       toolPriority: ['local', 'genomics', 'plugins', 'mcp'], // Tool priority order
@@ -298,6 +299,7 @@ class ChatBoxSettingsManager {
       dynamicToolsSelectionLimit: 24,
       enableNativeFunctionCalling: true,
       enableConstrainedToolOutput: true,
+      enableExecutionGraphScheduler: false,
 
       // Tool priority settings
       toolPriority: ['local', 'genomics', 'plugins', 'mcp'],

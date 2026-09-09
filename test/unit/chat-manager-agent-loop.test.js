@@ -27,6 +27,65 @@ describe('agent loop', () => {
       expect(answer).toBe('Moved the view to lysC.');
     });
 
+    it('records gateway executions on the request-local turn context and preserves the next transcript', async () => {
+      const harness = createAgentLoopHarness({
+        useExecutionGateway: true,
+        responses: [openAiToolCall('jump_to_gene', { geneName: 'lysC' }, { id: 'call_ledger' }), 'Done.'],
+        tools: { jump_to_gene: () => ({ success: true, position: '10-20' }) },
+      });
+
+      await harness.send('jump to lysC');
+
+      expect(harness.chatManager.lastExecutionData.turnContext.executionLedger).toHaveLength(1);
+      expect(harness.chatManager.lastExecutionData.turnContext.executionLedger[0]).toMatchObject({
+        status: 'succeeded',
+        tool: 'jump_to_gene',
+        nodeId: 'call_ledger',
+      });
+      expect(harness.requests[1].some(message => message.role === 'tool')).toBe(true);
+      expect(harness.requests[1].find(message => message.role === 'tool').content).toContain('10-20');
+    });
+
+    it('maps queued and failed gateway results back to legacy toolResults', async () => {
+      const manager = Object.create(require('../../src/renderer/modules/ChatManager.js').prototype);
+      manager.throwIfConversationAborted = () => {};
+      manager.cloneToolParameters = parameters => ({ ...parameters });
+      manager.resolveToolParameterReferences = parameters => parameters;
+      const results = [
+        {
+          executionId: 'queued-exec',
+          nodeId: 'queued-call',
+          status: 'queued',
+          value: { jobId: 'job-1' },
+          jobId: 'job-1',
+        },
+        {
+          executionId: 'failed-exec',
+          nodeId: 'failed-call',
+          status: 'failed',
+          value: null,
+          error: { message: 'nope' },
+        },
+      ];
+      manager.executeToolByName = async (_name, _parameters, options) => {
+        expect(options.gatewayLegacyResult).toBe(true);
+        return results.shift();
+      };
+
+      const queue = [
+        { tool_name: 'first_tool', tool_call_id: 'queued-call', parameters: {} },
+        { tool_name: 'second_tool', tool_call_id: 'failed-call', parameters: {} },
+      ];
+      const toolResults = await manager.executePendingToolExecutionQueue(queue, [], {
+        turnContext: { source: 'chat' },
+      });
+
+      expect(toolResults).toMatchObject([
+        { tool: 'first_tool', success: true, result: { jobId: 'job-1' } },
+        { tool: 'second_tool', success: false, result: null, error: 'nope' },
+      ]);
+    });
+
     it('answers a conversational question without any tool round', async () => {
       const harness = createAgentLoopHarness({
         responses: ['lysC encodes aspartokinase III.'],

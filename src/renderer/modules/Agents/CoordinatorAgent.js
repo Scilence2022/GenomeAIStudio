@@ -44,19 +44,41 @@ class CoordinatorAgent extends AgentBase {
   async performExecution(functionName, parameters, context) {
     const chatManager = this.multiAgentSystem.chatManager;
 
-    // Try ChatManager first (authoritative execution path)
+    // Route through the existing gateway so nested agent calls share one turn.
+    const gateway = chatManager?.getExecutionGateway?.();
+    if (gateway?.execute) {
+      return await gateway.execute(functionName, parameters, {
+        turnContext: context?.turnContext || context?.context || null,
+        nodeId: context?.nodeId,
+        source: context?.source || 'coordinator',
+        scope: context?.scope,
+        internalDispatch: true,
+      });
+    }
+
     if (chatManager && typeof chatManager.executeToolByName === 'function') {
       try {
-        const result = await chatManager.executeToolByName(functionName, parameters, { bypassAgent: true });
+        const result = await chatManager.executeToolByName(functionName, parameters, {
+          bypassAgent: true,
+          internalDispatch: true,
+          turnContext: context?.turnContext || context?.context,
+          nodeId: context?.nodeId,
+          source: context?.source || 'coordinator',
+          scope: context?.scope,
+        });
+        context?.turnContext?.diagnostics?.push?.({ type: 'coordinator_gateway_fallback', functionName });
         return result;
       } catch (error) {
-        console.warn(
-          `CoordinatorAgent: ChatManager execution failed for ${functionName}, falling back to local implementation`
-        );
+        context?.turnContext?.diagnostics?.push?.({
+          type: 'coordinator_gateway_fallback_error',
+          functionName,
+          message: error.message,
+        });
+        throw error;
       }
     }
 
-    // Fall back to local implementation
+    context?.turnContext?.diagnostics?.push?.({ type: 'coordinator_local_fallback', functionName });
     return await this._performLocalExecution(functionName, parameters, context);
   }
 

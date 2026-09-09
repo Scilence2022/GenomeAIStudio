@@ -148,7 +148,11 @@ class AgentBase {
         id: taskId,
         functionName,
         parameters,
-        context,
+        context: context || {},
+        turnContext: context?.turnContext || context?.context || null,
+        nodeId: context?.nodeId || null,
+        source: context?.source || null,
+        scope: context?.scope || null,
         startTime,
         capability,
       };
@@ -622,7 +626,7 @@ class AgentBase {
     this.isActive = false;
 
     // Complete current tasks
-    for (const [taskId,] of this.currentTasks) {
+    for (const [taskId] of this.currentTasks) {
       console.log(`⏳ Completing task ${taskId} before shutdown`);
       // Could implement graceful shutdown logic here
     }

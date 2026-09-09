@@ -143,6 +143,8 @@ class ChatManager {
     this._pendingToolRegistrySnapshot = null;
     this.toolRegistryDiagnostics = [];
     this._dynamicToolsReady = false;
+    this._capabilityRegistry = null;
+    this._toolCallPlanCompiler = null;
     this.initializeDynamicTools()
       .then(() => {
         this._dynamicToolsReady = true;
@@ -773,6 +775,14 @@ class ChatManager {
    */
   async processAgentPrompt(prompt, options = {}) {
     const { activateMultiAgent = false, onProgress = null } = options;
+    const notifyProgress = payload => {
+      if (!onProgress) return;
+      try {
+        onProgress(payload);
+      } catch (progressError) {
+        console.debug('[AgentMode] Progress callback failed:', progressError.message);
+      }
+    };
 
     // Save current agent state
     const previousAgentState = this.agentSystemEnabled;
@@ -793,22 +803,18 @@ class ChatManager {
       }
 
       // Notify progress: starting
-      if (onProgress) {
-        onProgress({
-          type: 'round_start',
-          message: `Starting agent execution in ChatBox`,
-          data: { mode: activateMultiAgent ? 'multi-agent' : 'single-agent' },
-        });
-      }
+      notifyProgress({
+        type: 'round_start',
+        message: `Starting agent execution in ChatBox`,
+        data: { mode: activateMultiAgent ? 'multi-agent' : 'single-agent' },
+      });
 
       // Mark the prompt with MCP source so user knows where it came from
       const markedPrompt = `🔗 **[MCP Agent]** ${prompt}`;
 
       // Check if ChatBox is busy — if so, wait briefly
       if (this.conversationState.isProcessing) {
-        if (onProgress) {
-          onProgress({ type: 'error', message: 'ChatBox is busy with another request' });
-        }
+        notifyProgress({ type: 'error', message: 'ChatBox is busy with another request' });
         return {
           success: false,
           error: 'ChatBox is busy with another request. Please wait and try again.',
@@ -828,20 +834,23 @@ class ChatManager {
 
       try {
         // Execute via the main sendToLLM pipeline — same as user typing in ChatBox
-        const response = await this.sendToLLM(prompt);
+        const response = await this.sendToLLM(prompt, {
+          source: 'mcp-agent',
+          parentTurnId: options.parentTurnId || options.turnContext?.turnId,
+          turnContext: options.turnContext,
+          scope: options.scope || options.executionContext,
+        });
 
         // Display response in ChatBox
         this.removeTypingIndicator();
         this.addMessageToChat(response, 'assistant');
 
         // Notify progress: completion
-        if (onProgress) {
-          onProgress({
-            type: 'completion',
-            message: `Agent execution completed in ChatBox`,
-            data: { responseLength: response ? response.length : 0 },
-          });
-        }
+        notifyProgress({
+          type: 'completion',
+          message: `Agent execution completed in ChatBox`,
+          data: { responseLength: response ? response.length : 0 },
+        });
 
         return {
           success: true,
@@ -864,9 +873,7 @@ class ChatManager {
       console.error('[AgentMode] processAgentPrompt failed:', error);
 
       // Notify progress: error
-      if (onProgress) {
-        onProgress({ type: 'error', message: `Agent execution failed: ${error.message}` });
-      }
+      notifyProgress({ type: 'error', message: `Agent execution failed: ${error.message}` });
 
       return {
         success: false,
@@ -937,6 +944,8 @@ class ChatManager {
       this.dynamicTools = this.createDynamicToolsSnapshotAdapter(snapshot);
       this.builtInTools = this.dynamicTools.builtInTools;
       this.builtInToolsMap = this.dynamicTools.builtInTools.builtInToolsMap;
+      this._capabilityRegistry = null;
+      this._toolCallPlanCompiler = null;
       this.registerToolRegistrySnapshotWithOrganizer(snapshot);
       this.dynamicToolsEnabled = true;
 
@@ -949,6 +958,8 @@ class ChatManager {
             this.dynamicTools = this.createDynamicToolsSnapshotAdapter(updatedSnapshot);
             this.builtInTools = this.dynamicTools.builtInTools;
             this.builtInToolsMap = this.dynamicTools.builtInTools.builtInToolsMap;
+            this._capabilityRegistry = null;
+            this._toolCallPlanCompiler = null;
             this.registerToolRegistrySnapshotWithOrganizer(updatedSnapshot);
             this.dynamicToolsEnabled = true;
             this.connectPluginManagerToDynamicTools();
@@ -984,6 +995,165 @@ class ChatManager {
     }
 
     organizer.registerToolRegistrySnapshot(snapshot);
+  }
+
+  getCapabilityRegistry() {
+    if (!this._capabilityRegistry) {
+      const Adapter =
+        (typeof window !== 'undefined' && window.CapabilityRegistryAdapter) ||
+        (typeof globalThis !== 'undefined' && globalThis.CapabilityRegistryAdapter);
+      if (typeof Adapter !== 'function') return null;
+      const snapshot = this._pendingToolRegistrySnapshot || this.dynamicTools?.snapshot || {};
+      this._capabilityRegistry = new Adapter({
+        snapshot,
+        tools: this.dynamicTools?.toolsByName,
+        builtInTools: this.builtInTools,
+        policy: this.services?.context?.getToolExecutionPolicy?.()?.capabilityPolicy,
+      });
+    }
+    return this._capabilityRegistry;
+  }
+
+  getToolCallPlanCompiler() {
+    if (!this._toolCallPlanCompiler) {
+      const Compiler =
+        (typeof window !== 'undefined' && window.ToolCallPlanCompiler) ||
+        (typeof globalThis !== 'undefined' && globalThis.ToolCallPlanCompiler);
+      if (typeof Compiler !== 'function') return null;
+      this._toolCallPlanCompiler = new Compiler({ registry: this.getCapabilityRegistry() });
+    }
+    return this._toolCallPlanCompiler;
+  }
+
+  compileToolCallPlan(toolCalls, options = {}) {
+    const compiler = this.getToolCallPlanCompiler();
+    return (
+      compiler?.compile?.(toolCalls, { ...options, registry: options.registry || this.getCapabilityRegistry() }) || null
+    );
+  }
+
+  isExecutionGraphSafe(plan, pendingTools, registry) {
+    if (!plan || !Array.isArray(plan.nodes) || plan.nodes.length !== pendingTools.length) return false;
+    if (
+      plan.diagnostics?.some(diagnostic =>
+        ['unresolved_reference', 'self_reference', 'graph_validation_error'].includes(diagnostic.type)
+      )
+    ) {
+      return false;
+    }
+    return plan.nodes.every((node, index) => {
+      const tool = pendingTools[index];
+      const metadata = node.metadata || {};
+      const legacyOnly =
+        tool?.legacy === true || tool?.legacyOnly === true || tool?.executionMode || tool?.__executionWrapper;
+      return (
+        node.id &&
+        node.tool === tool?.tool_name &&
+        metadata.effect &&
+        metadata.effect !== 'unknown' &&
+        registry?.has?.(tool.tool_name) === true &&
+        Array.isArray(metadata.readSet) &&
+        Array.isArray(metadata.writeSet) &&
+        Array.isArray(metadata.locks) &&
+        !legacyOnly
+      );
+    });
+  }
+
+  async executeToolExecutionGraph(pendingTools, referenceResults = [], options = {}) {
+    const tools = Array.isArray(pendingTools) ? pendingTools : [];
+    const turnContext = options.turnContext || null;
+    if (tools.length === 0) return [];
+
+    let registry;
+    let plan;
+    try {
+      registry = options.registry || this.getCapabilityRegistry();
+      plan = this.compileToolCallPlan(tools, {
+        registry,
+        context: { scope: turnContext?.scope, turnContext, referenceResults },
+        referenceResults,
+        completion: options.completion,
+      });
+    } catch (error) {
+      plan = null;
+      options.onPlanDiagnostic?.({ type: 'plan_compilation_error', message: error.message });
+    }
+
+    if (!this.isExecutionGraphSafe(plan, tools, registry)) {
+      return this.executePendingToolExecutionQueue(tools.slice(), referenceResults, options);
+    }
+
+    const Scheduler =
+      (typeof window !== 'undefined' && window.ExecutionGraphScheduler) ||
+      (typeof globalThis !== 'undefined' && globalThis.ExecutionGraphScheduler);
+    if (typeof Scheduler !== 'function')
+      return this.executePendingToolExecutionQueue(tools.slice(), referenceResults, options);
+
+    const referenceContext = Array.isArray(referenceResults) ? referenceResults.slice() : [];
+    const startedAt = new Map();
+    const scheduler = new Scheduler({
+      maxConcurrency: options.maxConcurrency ?? Infinity,
+      executor: async (node, context, parametersResolved) => {
+        context?.assertActive?.();
+        const tool = tools[node.inputIndex];
+        const recordedParameters = this.cloneToolParameters(tool?.parameters || {});
+        const resolvedParameters = this.resolveToolParameterReferences(
+          parametersResolved === undefined ? recordedParameters : parametersResolved,
+          referenceContext
+        );
+        node.parametersResolved = resolvedParameters;
+        startedAt.set(node.id, Date.now());
+        const gateway = this.getExecutionGateway();
+        const executionResult = await gateway.execute(node.tool, resolvedParameters, {
+          turnContext: context,
+          nodeId: node.id,
+          source: context?.source,
+          scope: node.scope || context?.scope,
+          gatewayLegacyResult: true,
+          signal: context?.abortSignal,
+        });
+        const success = executionResult?.status === 'succeeded' || executionResult?.status === 'queued';
+        if (success) {
+          referenceContext.push({
+            tool: node.tool,
+            tool_name: node.tool,
+            tool_call_id: node.id,
+            parameters: recordedParameters,
+            success: true,
+            result: executionResult.value,
+            status: executionResult.status,
+            jobId: executionResult.jobId || executionResult.value?.jobId,
+          });
+        }
+        return executionResult;
+      },
+    });
+    const graphResults = await scheduler.run(plan.graph, turnContext);
+    const resultsById = new Map(graphResults.map(result => [result.nodeId, result]));
+    return plan.nodes.map((node, index) => {
+      const tool = tools[index];
+      const result = resultsById.get(node.id);
+      const status = result?.status || 'failed';
+      const success = status === 'succeeded' || status === 'queued';
+      const executionTime = startedAt.has(node.id) ? Date.now() - startedAt.get(node.id) : 0;
+      return {
+        tool: tool.tool_name,
+        tool_name: tool.tool_name,
+        tool_call_id: tool.tool_call_id ?? tool.id ?? null,
+        parameters: this.cloneToolParameters(tool.parameters),
+        success,
+        result: success ? result.value : null,
+        error: success ? null : result?.error?.message || result?.error || status,
+        executionTime,
+        status,
+        executionId: result?.executionId,
+        nodeId: node.id,
+        jobId: result?.jobId || result?.value?.jobId,
+        artifactTypes: node.metadata?.artifactTypes || [],
+        completionContribution: node.metadata?.completionContribution || null,
+      };
+    });
   }
 
   /**
@@ -5279,6 +5449,30 @@ class ChatManager {
     // Set up the AbortController
     this.conversationState.abortController = new AbortController();
     console.log('AbortController initialized:', !!this.conversationState.abortController);
+    const TurnContextClass =
+      (typeof window !== 'undefined' && window.TurnContext) ||
+      (typeof globalThis !== 'undefined' && globalThis.TurnContext);
+    const turnContext =
+      options.turnContext ||
+      (typeof TurnContextClass === 'function'
+        ? new TurnContextClass({
+            parentTurnId: options.parentTurnId,
+            source: options.source || 'chat',
+            mode: options.mode || 'default',
+            originalMessage: message,
+            scope: options.scope,
+            abortSignal: this.conversationState.abortController.signal,
+            deadline: options.deadline,
+          })
+        : null);
+    executionData.turnContext = turnContext;
+    try {
+      const capabilityRegistry = this.getCapabilityRegistry?.();
+      executionData.capabilityRegistry = capabilityRegistry || null;
+      if (turnContext && capabilityRegistry) turnContext.capabilityRegistry = capabilityRegistry;
+    } catch (error) {
+      executionData.orchestrationDiagnostics = [{ type: 'registry_initialization_error', message: error.message }];
+    }
 
     try {
       // Check if multi-agent system is enabled
@@ -5365,6 +5559,8 @@ class ChatManager {
       let taskCompleted = false;
       const successfulToolExecutionCounts = new Map(); // Track successful tool instances within this user request
       const toolExecutionState = this.createToolExecutionState(message);
+      toolExecutionState.turnContext = turnContext;
+      executionData.toolExecutionState = toolExecutionState;
       const toolReferenceResults = [];
       let lastSuccessfulResults = [];
       let lastSuccessfulTools = [];
@@ -5535,6 +5731,22 @@ class ChatManager {
         const toolsToExecute = pendingToolExecutionQueue.slice();
         const duplicateSuppressedToolCount = pendingExecution.suppressedTools.length;
         const policyBlockedToolCount = pendingExecution.policyBlockedTools.length;
+
+        try {
+          const shadowPlan = this.compileToolCallPlan?.(toolsToExecute, {
+            context: { scope: turnContext?.scope, turnContext, referenceResults: toolReferenceResults },
+            referenceResults: toolReferenceResults,
+          });
+          if (shadowPlan) {
+            executionData.orchestrationPlan = shadowPlan;
+            toolExecutionState.orchestrationPlan = shadowPlan;
+            if (turnContext) turnContext.diagnostics.push(...shadowPlan.diagnostics);
+          }
+        } catch (error) {
+          const diagnostic = { type: 'plan_compilation_error', message: error.message };
+          executionData.orchestrationDiagnostics = [...(executionData.orchestrationDiagnostics || []), diagnostic];
+          turnContext?.diagnostics?.push(diagnostic);
+        }
 
         // Display tool detection information
         if (this.showThinkingProcess) {
@@ -5799,20 +6011,30 @@ class ChatManager {
                 pendingToolExecutionQueue.push(...smartToolsToExecute);
                 toolResults = await this.executePendingToolExecutionQueue(
                   pendingToolExecutionQueue,
-                  toolReferenceResults
+                  toolReferenceResults,
+                  { turnContext }
                 );
               }
             } else {
-              toolResults = await this.executePendingToolExecutionQueue(
-                pendingToolExecutionQueue,
-                toolReferenceResults
-              );
+              const graphEnabled =
+                this.configManager?.get('chatboxSettings.enableExecutionGraphScheduler', false) === true;
+              toolResults = graphEnabled
+                ? await this.executeToolExecutionGraph(pendingToolExecutionQueue, toolReferenceResults, { turnContext })
+                : await this.executePendingToolExecutionQueue(pendingToolExecutionQueue, toolReferenceResults, {
+                    turnContext,
+                  });
             }
 
             console.log('Tool execution completed. Results:', toolResults);
             this.addToolResultsToReferenceContext(toolReferenceResults, toolResults);
+            const planCompletion = executionData.orchestrationPlan?.completion;
             toolExecutionState.consecutiveSuppressedRounds = 0;
             this.markToolExecutionResults(toolExecutionState, toolsToExecute, toolResults, currentRound);
+            toolExecutionState.completionEvaluation = this.evaluateTurnCompletion(
+              planCompletion,
+              toolExecutionState.records.concat(toolResults),
+              { turnId: turnContext?.turnId, round: currentRound }
+            );
 
             // Show execution results in thinking process
             if (this.showThinkingProcess) {
@@ -8774,9 +8996,24 @@ class ChatManager {
       protocolRecoveryAttempts: 0,
       totalProtocolRecoveryAttempts: 0,
       terminationReason: null,
+      completionEvaluation: null,
+      orchestrationPlan: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+  }
+
+  evaluateTurnCompletion(completion, results, context = {}) {
+    const Evaluator =
+      (typeof window !== 'undefined' && window.TurnCompletionEvaluator) ||
+      (typeof globalThis !== 'undefined' && globalThis.TurnCompletionEvaluator);
+    if (typeof Evaluator !== 'function') return null;
+    try {
+      return new Evaluator().evaluate({ completion, results, context });
+    } catch (error) {
+      console.warn('[ChatManager] Turn completion evaluation failed:', error.message);
+      return null;
+    }
   }
 
   recordToolExecutionState(toolExecutionState, tool, status, details = {}) {
@@ -9126,31 +9363,64 @@ class ChatManager {
     return false;
   }
 
-  async executePendingToolExecutionQueue(pendingToolExecutionQueue, referenceToolResults = []) {
+  async executePendingToolExecutionQueue(pendingToolExecutionQueue, referenceToolResults = [], options = {}) {
     const toolResults = [];
     const referenceContext = Array.isArray(referenceToolResults) ? referenceToolResults.slice() : [];
+    const turnContext = options.turnContext || null;
+    const signal = options.signal || turnContext?.abortSignal;
+    const pendingQueue = Array.isArray(pendingToolExecutionQueue) ? pendingToolExecutionQueue.slice() : [];
+    const createNodeId =
+      (typeof globalThis !== 'undefined' && globalThis.createNodeId) ||
+      (typeof window !== 'undefined' && window.createNodeId) ||
+      (() => `tool_node_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
 
-    while (pendingToolExecutionQueue.length > 0) {
+    while (pendingQueue.length > 0) {
       this.throwIfConversationAborted();
+      if (signal?.aborted) {
+        const error = new Error('Tool execution cancelled');
+        error.name = 'AbortError';
+        throw error;
+      }
 
-      const tool = pendingToolExecutionQueue.shift();
+      const tool = pendingQueue.shift();
+      const toolCallId = tool.tool_call_id ?? tool.id ?? null;
+      const nodeId = toolCallId || createNodeId();
       const recordedParameters = this.cloneToolParameters(tool.parameters);
       let executionParameters;
 
       try {
         executionParameters = this.resolveToolParameterReferences(recordedParameters, referenceContext);
         const executionStart = Date.now();
-        const result = await this.executeToolByName(tool.tool_name, executionParameters);
-        const explicitFailure = result && typeof result === 'object' && result.success === false;
+        const result = await this.executeToolByName(tool.tool_name, executionParameters, {
+          turnContext,
+          nodeId,
+          source: turnContext?.source,
+          scope: turnContext?.scope,
+          signal,
+          gatewayLegacyResult: true,
+        });
         const executionTime = Date.now() - executionStart;
+        const isExecutionResult =
+          result &&
+          typeof result === 'object' &&
+          typeof result.status === 'string' &&
+          Object.prototype.hasOwnProperty.call(result, 'executionId');
+        const status = isExecutionResult ? result.status : result?.success === false ? 'failed' : 'succeeded';
+        const isSuccess = status === 'succeeded' || status === 'queued';
+        const businessResult = isExecutionResult ? result.value : result;
+        const error = isExecutionResult
+          ? result.error?.message || result.error || (isSuccess ? null : status)
+          : result?.success === false
+            ? result.error || result.message || 'Tool reported an unsuccessful result'
+            : null;
         const toolResult = {
           tool: tool.tool_name,
           tool_name: tool.tool_name,
-          tool_call_id: tool.tool_call_id ?? tool.id ?? null,
+          tool_call_id: toolCallId,
           parameters: recordedParameters,
-          success: !explicitFailure,
-          result: explicitFailure ? null : result,
-          error: explicitFailure ? result.error || result.message || 'Tool reported an unsuccessful result' : null,
+          success: isSuccess,
+          result: isSuccess ? businessResult : null,
+          error,
           executionTime,
         };
         toolResults.push(toolResult);
@@ -9161,7 +9431,7 @@ class ChatManager {
         toolResults.push({
           tool: tool.tool_name,
           tool_name: tool.tool_name,
-          tool_call_id: tool.tool_call_id ?? tool.id ?? null,
+          tool_call_id: toolCallId,
           parameters: recordedParameters,
           success: false,
           result: null,
@@ -9328,6 +9598,13 @@ class ChatManager {
     for (let index = successfulResults.length - 1; index >= 0; index--) {
       const result = successfulResults[index];
       const toolName = result.tool;
+      const referenceName = result.tool_call_id || result.nodeId;
+      if (referenceName && (reference === referenceName || reference.startsWith(`${referenceName}.`))) {
+        return {
+          toolResult: result,
+          resultPath: reference === referenceName ? '' : reference.substring(referenceName.length + 1),
+        };
+      }
       if (reference === toolName || reference.startsWith(`${toolName}.`)) {
         if (!bestMatch || toolName.length > bestMatch.toolResult.tool.length) {
           bestMatch = {
@@ -12499,7 +12776,34 @@ For complete tool documentation with all ${toolCount} available tools, ask me to
     return this.services.intent.parseMultipleToolCalls(response);
   }
 
+  getExecutionGateway() {
+    if (!this._executionGateway) {
+      const Gateway =
+        (typeof window !== 'undefined' && window.ExecutionGateway) ||
+        (typeof globalThis !== 'undefined' && globalThis.ExecutionGateway);
+      if (typeof Gateway !== 'function') throw new Error('ExecutionGateway is required before ChatManager');
+      this._executionGateway = new Gateway({
+        chatManager: this,
+        legacyExecutor: (toolName, parameters, options) => {
+          if (options?.bypassGateway) {
+            if (!this.services?.execution) throw new Error('ChatManager services not fully initialized');
+            return this.services.execution.execute(toolName, parameters, options);
+          }
+          return this.executeToolByName(toolName, parameters, { ...options, bypassGateway: true });
+        },
+      });
+    }
+    return this._executionGateway;
+  }
+
   async executeToolByName(toolName, parameters, options = {}) {
+    if ((options.turnContext || options.nodeId) && !options.bypassGateway) {
+      const gateway = this.getExecutionGateway();
+      if (options.gatewayLegacyResult) {
+        return gateway.execute(toolName, parameters, options);
+      }
+      return gateway.executeLegacy(toolName, parameters, options);
+    }
     if (!this.services || !this.services.execution) {
       console.error('[ChatManager] ToolExecutionService not initialized!');
       throw new Error('ChatManager services not fully initialized');

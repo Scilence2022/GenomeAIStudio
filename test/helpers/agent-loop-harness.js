@@ -30,6 +30,17 @@ const ToolCapabilityPolicy = require('../../src/renderer/modules/chat/services/T
 require('../../src/renderer/modules/chat/services/ToolExecutionPolicy.js');
 const LLMContextService = require('../../src/renderer/modules/chat/services/LLMContextService.js');
 const ConversationTranscriptService = require('../../src/renderer/modules/chat/services/ConversationTranscriptService.js');
+const ExecutionGateway = require('../../src/renderer/modules/chat/orchestration/ExecutionGateway.js');
+const TurnContext = require('../../src/renderer/modules/chat/orchestration/TurnContext.js');
+const ExecutionGraphScheduler = require('../../src/renderer/modules/chat/orchestration/ExecutionGraphScheduler.js');
+const CapabilityRegistryAdapter = require('../../src/renderer/modules/chat/orchestration/CapabilityRegistryAdapter.js');
+const ToolCallPlanCompiler = require('../../src/renderer/modules/chat/orchestration/ToolCallPlanCompiler.js');
+if (typeof globalThis.TurnContext !== 'function') globalThis.TurnContext = TurnContext;
+if (typeof globalThis.ExecutionGraphScheduler !== 'function')
+  globalThis.ExecutionGraphScheduler = ExecutionGraphScheduler;
+if (typeof globalThis.CapabilityRegistryAdapter !== 'function')
+  globalThis.CapabilityRegistryAdapter = CapabilityRegistryAdapter;
+if (typeof globalThis.ToolCallPlanCompiler !== 'function') globalThis.ToolCallPlanCompiler = ToolCallPlanCompiler;
 
 /** Minimal dot-path config store with the ConfigManager.get(path, fallback) contract. */
 function createConfigManager(overrides = {}) {
@@ -40,6 +51,7 @@ function createConfigManager(overrides = {}) {
     'multiAgentSettings.multiAgentSystemEnabled': false,
     'chatboxSettings.enableNativeFunctionCalling': true,
     'chatboxSettings.enableConstrainedToolOutput': true,
+    'chatboxSettings.enableExecutionGraphScheduler': false,
     ...overrides,
   };
   return {
@@ -125,6 +137,7 @@ function createAgentLoopHarness(spec = {}) {
     advertisedTools = null,
     registryTools = null,
     systemPrompt = '[System] test',
+    useExecutionGateway = false,
   } = spec;
 
   const cm = Object.create(ChatManager.prototype);
@@ -194,15 +207,29 @@ function createAgentLoopHarness(spec = {}) {
     intent: new IntentParserService(cm.app, cm),
     context: new LLMContextService(cm.app, cm),
     transcript: new ConversationTranscriptService(cm.app, cm),
+    execution: {
+      execute: async (toolName, parameters) => {
+        toolCalls.push({ tool_name: toolName, parameters });
+        const impl = tools[toolName];
+        if (!impl) throw new Error(`No fake implementation for tool '${toolName}'`);
+        return await impl(parameters, { round: requests.length });
+      },
+    },
   };
 
   // --- Tool execution seam --------------------------------------------------
-  cm.executeToolByName = async (toolName, parameters) => {
-    toolCalls.push({ tool_name: toolName, parameters });
-    const impl = tools[toolName];
-    if (!impl) throw new Error(`No fake implementation for tool '${toolName}'`);
-    return await impl(parameters, { round: requests.length });
-  };
+  if (useExecutionGateway) {
+    cm._executionGateway = new ExecutionGateway({ chatManager: cm });
+    cm.getExecutionGateway = () => cm._executionGateway;
+    cm.executeToolByName = ChatManager.prototype.executeToolByName.bind(cm);
+  } else {
+    cm.executeToolByName = async (toolName, parameters) => {
+      toolCalls.push({ tool_name: toolName, parameters });
+      const impl = tools[toolName];
+      if (!impl) throw new Error(`No fake implementation for tool '${toolName}'`);
+      return await impl(parameters, { round: requests.length });
+    };
+  }
 
   // --- Scripted provider ----------------------------------------------------
   const queue = [...responses];

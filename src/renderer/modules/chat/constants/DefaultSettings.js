@@ -32,6 +32,7 @@ const DEFAULT_CHAT_SETTINGS = {
   systemPromptIncludeResponseFormat: true,
   systemPromptIncludeToolCategories: true,
   systemPromptIncludeMemoryContext: true,
+  enableExecutionGraphScheduler: false,
   systemPromptSectionOrder: [
     'systemInstructions',
     'currentContext',

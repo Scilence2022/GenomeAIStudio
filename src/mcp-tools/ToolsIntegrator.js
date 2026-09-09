@@ -550,6 +550,13 @@ class ToolsIntegrator {
         original_tool: toolName,
         original_parameters: parameters,
         routed_by_agent_mode: true,
+        parentTurnId: executionContext?.turnId || executionContext?.parentTurnId || null,
+        turnId: executionContext?.turnId || null,
+        sessionId: executionContext?.sessionId || null,
+        requestId: executionContext?.requestId || null,
+        windowId: executionContext?.windowId || parameters?.windowId || null,
+        expected_genome: executionContext?.expected_genome || parameters?.expected_genome || null,
+        scope: executionContext?.scope || null,
       },
     };
 

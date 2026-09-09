@@ -364,7 +364,9 @@ class ConfigManager {
         enablePluginSandboxMode: true,
         blockUntrustedPluginSources: true,
       },
-      chatboxSettings: {},
+      chatboxSettings: {
+        enableExecutionGraphScheduler: false,
+      },
     };
   }
 

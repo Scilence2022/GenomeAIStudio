@@ -94,9 +94,29 @@ class InternalMCPServer {
         const result = await chatManager.executeToolByName(toolName, parameters, {
           bypassAgent: true,
           executionContext,
+          requestId,
+          sessionId: executionContext?.sessionId || null,
+          transportSessionId: executionContext?.transportSessionId || null,
+          source: 'mcp-tool',
         });
         if (result !== undefined) {
           console.log(`✅ [InternalMCPServer] Tool '${toolName}' executed via ChatManager`);
+          if (
+            result &&
+            typeof result === 'object' &&
+            typeof result.status === 'string' &&
+            typeof result.executionId === 'string' &&
+            Object.prototype.hasOwnProperty.call(result, 'value')
+          ) {
+            if (result.status === 'succeeded' || result.status === 'queued') return result.value;
+            const error = new Error(result.error?.message || result.status);
+            error.status = result.status;
+            error.code = result.error?.code || result.status.toUpperCase();
+            throw error;
+          }
+          if (result && typeof result === 'object' && result.success === false) {
+            return { ...result, executedVia: 'ChatManager' };
+          }
           return {
             success: true,
             result,
@@ -321,6 +341,11 @@ class InternalMCPServer {
     const result = await chatManager.processAgentPrompt(parameters.prompt, {
       activateMultiAgent: parameters.activate_multi_agent || false,
       context: parameters.context || {},
+      executionContext,
+      requestId,
+      parentTurnId: executionContext?.parentTurnId || null,
+      source: 'mcp-agent',
+      scope: executionContext || null,
       onProgress,
     });
 

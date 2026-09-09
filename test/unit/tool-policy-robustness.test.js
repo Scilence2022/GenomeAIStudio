@@ -73,7 +73,7 @@ function loadChatManagerClass() {
     /\n\s{2}hasProgressSinceLastSuccess\s*\(toolExecutionState,\s*toolKey\)\s*\{[\s\S]*?\n\s{2}\}\n\n\s{2}async executePendingToolExecutionQueue/
   );
   const executePendingToolExecutionQueueMatch = content.match(
-    /\n\s{2}async executePendingToolExecutionQueue\s*\(pendingToolExecutionQueue,\s*referenceToolResults\s*=\s*\[\]\)\s*\{[\s\S]*?\}\n\n\s{2}addToolResultsToReferenceContext/
+    /\n\s{2}async executePendingToolExecutionQueue\s*\(pendingToolExecutionQueue,\s*referenceToolResults\s*=\s*\[\]\s*,?[^)]*\)\s*\{[\s\S]*?\}\n\n\s{2}addToolResultsToReferenceContext/
   );
   const toolReferenceMethodsMatch = content.match(
     /\n\s{2}addToolResultsToReferenceContext\s*\(referenceContext,\s*toolResults\)\s*\{[\s\S]*?\}\n\n\s{2}normalizeParams/
@@ -960,8 +960,8 @@ describe('Tool Policy - Parameter Normalization and Matching', () => {
 
     const results = await manager.executePendingToolExecutionQueue(queue);
 
-    expect(queue).toHaveLength(0);
-    expect(queueLengthsDuringDispatch).toEqual([1, 0]);
+    expect(queue).toHaveLength(2);
+    expect(queueLengthsDuringDispatch).toEqual([2, 2]);
     expect(results).toEqual([
       {
         tool: 'search_uniprot_database',

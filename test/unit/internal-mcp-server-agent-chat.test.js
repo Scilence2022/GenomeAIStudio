@@ -39,13 +39,18 @@ describe('InternalMCPServer agent chat routing', () => {
       },
     });
 
-    const result = await server.executeMethod('codexomicsChat', {
-      prompt: 'navigate to 3M',
-      activate_multi_agent: false,
-      context: {
-        window_id: 'win_1',
+    const result = await server.executeMethod(
+      'codexomicsChat',
+      {
+        prompt: 'navigate to 3M',
+        activate_multi_agent: false,
+        context: {
+          window_id: 'win_1',
+        },
       },
-    });
+      { sessionId: 'session-1', transportSessionId: 'transport-1' },
+      'request-1'
+    );
 
     expect(result).toEqual({ success: true });
     expect(executeToolByName).not.toHaveBeenCalled();
@@ -56,6 +61,9 @@ describe('InternalMCPServer agent chat routing', () => {
         context: {
           window_id: 'win_1',
         },
+        executionContext: { sessionId: 'session-1', transportSessionId: 'transport-1' },
+        requestId: 'request-1',
+        source: 'mcp-agent',
         onProgress: expect.any(Function),
       })
     );
