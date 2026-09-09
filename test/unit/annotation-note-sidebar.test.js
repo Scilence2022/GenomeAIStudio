@@ -41,6 +41,17 @@ describe('Gene Details annotation note presentation', () => {
     expect(css).toContain('.gene-annotation-note-source-badge.original');
   });
 
+  it('renders the note bibliography as a footer chip row instead of inline prose', () => {
+    const renderer = fs.readFileSync(path.join(process.cwd(), 'src/renderer/renderer-modular.js'), 'utf8');
+    const css = fs.readFileSync(path.join(process.cwd(), 'src/renderer/css/legacy/02-primer-gene-details.css'), 'utf8');
+
+    expect(renderer).toContain('renderAnnotationNoteBody(String(value))');
+    expect(renderer).toContain('splitAnnotationNoteSections');
+    expect(renderer).toContain('gene-annotation-note-sources');
+    expect(css).toContain('.gene-annotation-note-sources {');
+    expect(css).toContain('.gene-annotation-note-sources-list');
+  });
+
   it('detects the Deep Gene Research provenance clause format', () => {
     // Mirrors the provenance contract enforced by AnnotationChangeSetService:
     // "Annotation by Deep Gene Research on <Month D, YYYY>." at end of note.

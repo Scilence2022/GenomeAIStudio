@@ -807,6 +807,11 @@
   font-size: 13px;
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+/* Line breaks belong to the curated text only; the badge and the bibliography
+   footer around it are laid out, not preformatted. */
+.gene-annotation-note-text {
   white-space: pre-wrap;
 }
 
@@ -837,6 +842,32 @@
 .gene-annotation-note-source-badge.original {
   color: var(--text-muted);
   background: var(--bg-hover);
+}
+
+/* Bibliography footer: the curated note's "Supporting sources" clause is a long
+   list of labels, so it is rendered as one wrapped row of numbered chips rather
+   than inline prose glued together by full stops. */
+.gene-annotation-note-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.gene-annotation-note-sources-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.gene-annotation-note-sources-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
 }
 
 .gene-notes-section {
@@ -1044,6 +1075,26 @@ sup {
   font-size: 0.75rem;
   line-height: 1.2;
   vertical-align: baseline;
+}
+
+/* Same reasoning for the database/GO badges: their inline-block margins leave a
+   visible gap before the punctuation that follows them in a sentence. */
+.gene-annotation-note-value .db-xref-link,
+.gene-annotation-note-value .go-term-link,
+.gene-attribute-value .db-xref-link,
+.gene-attribute-value .go-term-link {
+  padding: 0 5px;
+  margin: 0 1px;
+  font-size: 0.85em;
+  line-height: 1.3;
+  vertical-align: baseline;
+}
+
+.gene-annotation-note-value .db-xref-link:hover,
+.gene-annotation-note-value .go-term-link:hover,
+.gene-attribute-value .db-xref-link:hover,
+.gene-attribute-value .go-term-link:hover {
+  transform: none;
 }
 
 .go-term-link {

@@ -420,6 +420,109 @@ class GenomeBrowser {
     return match ? match[1] : null;
   }
 
+  /**
+   * Split a Deep Gene Research /note value into the parts the sidebar renders
+   * differently. A curated note is "<narrative> Supporting sources: L1. L2. …
+   * Annotation by Deep Gene Research on <date>." — rendering the bibliography
+   * inline turns it into a wall of citation chips glued together by full stops,
+   * and the provenance sentence just repeats the source badge. Both clauses are
+   * peeled off here so each can be presented on its own terms; the stored
+   * qualifier (and therefore the GenBank export) is untouched.
+   * @param {string} value - Raw /note qualifier value
+   * @returns {{body: string, sources: Array<{type: string, id: string, label: string}>, provenanceDate: string|null}}
+   */
+  splitAnnotationNoteSections(value) {
+    const result = { body: '', sources: [], provenanceDate: null };
+    let text = String(value == null ? '' : value).trim();
+
+    const provenanceMatch = text.match(/\s*Annotation by Deep Gene Research on ([A-Z][a-z]+ \d{1,2}, \d{4})\.$/);
+    if (provenanceMatch) {
+      result.provenanceDate = provenanceMatch[1];
+      text = text.slice(0, provenanceMatch.index).trim();
+    }
+
+    const clauseMatch = text.match(/(?:^|\s)Supporting sources:\s*([\s\S]*)$/);
+    if (clauseMatch) {
+      const clause = clauseMatch[1];
+      const labelPattern = /(?:PMID):\s*(\d{1,10})\.(?=\s|$)|(?:DOI):\s*(10\.\d{4,9}\/\S+?)\.(?=\s|$)/gi;
+      const sources = [];
+      let consumed = 0;
+      let match = labelPattern.exec(clause);
+      // Only take the clause apart when it is exactly the list of labels the
+      // note contract produces. Anything else stays in the body so no curated
+      // prose is lost to a parsing guess.
+      while (match !== null && !clause.slice(consumed, match.index).trim()) {
+        const type = match[1] ? 'PMID' : 'DOI';
+        const id = match[1] || match[2];
+        sources.push({ type, id, label: `${type}:${id}` });
+        consumed = labelPattern.lastIndex;
+        match = labelPattern.exec(clause);
+      }
+      if (match === null && sources.length > 0 && !clause.slice(consumed).trim()) {
+        result.sources = sources;
+        text = text.slice(0, clauseMatch.index).trim();
+      }
+    }
+
+    result.body = text;
+    return result;
+  }
+
+  /**
+   * Render the annotation note body plus its bibliography footer.
+   * @param {string} value - Raw /note qualifier value
+   * @returns {string} HTML
+   */
+  renderAnnotationNoteBody(value) {
+    const sections = this.splitAnnotationNoteSections(value);
+    const bodyHtml = sections.body
+      ? this.processUnifiedCitations(this.enhanceGeneAttributeWithLinks(sections.body))
+      : '';
+    let html = `<div class="gene-annotation-note-text">${bodyHtml}</div>`;
+    if (sections.sources.length > 0) {
+      html += this.renderAnnotationNoteSources(sections.sources);
+    }
+    return html;
+  }
+
+  /**
+   * Render the "Supporting sources" bibliography as one compact row of numbered
+   * citation chips that resolve against the unified reference list below.
+   * @param {Array<{type: string, id: string, label: string}>} sources
+   * @returns {string} HTML
+   */
+  renderAnnotationNoteSources(sources) {
+    const escapeAttribute = text =>
+      String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+    // Numbers come from the shared collector, so sources already cited in the
+    // narrative keep their number. The chips are then shown in ascending order
+    // to read as a reference run rather than a shuffled list.
+    const chips = sources
+      .map(source => ({
+        number: this.addUnifiedCitation(source.type, source.id, source.label),
+        url: this.getCitationUrl(source.type, source.id),
+        label: escapeAttribute(source.label),
+      }))
+      .sort((a, b) => a.number - b.number)
+      .map(chip => {
+        if (!chip.url) {
+          return `<span class="pmid-link" title="${chip.label}"><sup>${chip.number}</sup></span>`;
+        }
+        return `<a href="${escapeAttribute(encodeURI(chip.url))}" target="_blank" class="pmid-link" title="${chip.label}"><sup>${chip.number}</sup></a>`;
+      })
+      .join('');
+
+    // No stray indentation: the note body preserves whitespace, so a leading
+    // newline here would render as a blank line above the footer.
+    return `<div class="gene-annotation-note-sources"><span class="gene-annotation-note-sources-label">Supporting sources (${sources.length})</span><span class="gene-annotation-note-sources-list">${chips}</span></div>`;
+  }
+
   init() {
     // Force reload timestamp: 2025-05-31-15:05
     console.log('🚀 GenomeBrowser initialization starting...');
@@ -5891,18 +5994,25 @@ class GenomeBrowser {
         .join('');
     });
 
-    // Pattern for PMID references: PMID:1234567 or PMID 1234567
-    const pmidPattern = /\b(PMID:?\s*(\d{6,10}))/gi;
+    // Pattern for PMID references: PMID:1234567 or PMID 1234567.
+    // Older PubMed records have short identifiers (PMID:28751), so the explicit
+    // PMID prefix — not a digit-count guess — is what makes the match safe.
+    const pmidPattern = /\b(PMID:?\s*(\d{1,10}))\b/gi;
     processedText = processedText.replace(pmidPattern, (match, fullMatch, pmidId) => {
       const citationNumber = this.addUnifiedCitation('PMID', pmidId);
       return `<a href="https://pubmed.ncbi.nlm.nih.gov/${pmidId}/" target="_blank" class="pmid-link" title="View PubMed article ${pmidId}"><sup>${citationNumber}</sup></a>`;
     });
 
     // Pattern for DOI references: doi:10.xxxx/xxxx or DOI:10.xxxx/xxxx
-    const doiPattern = /\b(DOI|doi):\s*(10\.\d{4,}\/[^\s]+)/gi;
-    processedText = processedText.replace(doiPattern, (match, prefix, doiId) => {
+    const doiPattern = /\b(DOI|doi):\s*(10\.\d{4,}\/\S+)/gi;
+    processedText = processedText.replace(doiPattern, (match, prefix, rawDoi) => {
+      // A DOI that ends a sentence swallows the full stop; keep the sentence
+      // punctuation as text so the link points at the DOI itself.
+      const doiId = rawDoi.replace(/[.,;:]+$/, '');
+      const trailing = rawDoi.slice(doiId.length);
+      if (!doiId.includes('/')) return match;
       const citationNumber = this.addUnifiedCitation('DOI', doiId);
-      return `<a href="https://doi.org/${doiId}" target="_blank" class="pmid-link" title="View DOI publication"><sup>${citationNumber}</sup></a>`;
+      return `<a href="https://doi.org/${doiId}" target="_blank" class="pmid-link" title="DOI:${doiId}"><sup>${citationNumber}</sup></a>${trailing}`;
     });
 
     // Pattern for ArXiv references: arXiv:1234.5678
@@ -6546,7 +6656,7 @@ class GenomeBrowser {
                     const valueClass = researchDate
                       ? 'gene-annotation-note-value research-note'
                       : 'gene-annotation-note-value';
-                    return `<div class="${valueClass}">${sourceBadge}<div class="gene-annotation-note-text">${this.processUnifiedCitations(this.enhanceGeneAttributeWithLinks(String(value)))}</div></div>`;
+                    return `<div class="${valueClass}">${sourceBadge}${this.renderAnnotationNoteBody(String(value))}</div>`;
                   })
                   .join('')
               : '<div class="gene-tab-empty">No annotation note has been applied.</div>'
@@ -7400,9 +7510,13 @@ class GenomeBrowser {
       return `<span class="evidence-tag" title="Evidence code: ${evidenceCode}">${evidenceCode}</span>`;
     });
 
-    // Pattern for database cross-references - expanded to include many more databases
+    // Pattern for database cross-references - expanded to include many more databases.
+    // DOI is deliberately absent: its identifiers contain "/", which this id
+    // character class cannot hold, so a DOI matched here would be truncated at
+    // the registrant prefix. DOIs are citations and are numbered by
+    // processUnifiedCitations() instead.
     const dbXrefPattern =
-      /\b(UniProt|SwissProt|TrEMBL|InterPro|Pfam|KEGG|COG|KO|PROSITE|SMART|SUPERFAMILY|PRINTS|PANTHER|TIGRFAM|HAMAP|PIR|PDB|RefSeq|GenBank|EMBL|DDBJ|CDD|OrthoDB|EggNOG|STRING|Reactome|BioCyc|MetaCyc|EcoCyc|ENZYME|BRENDA|ExPASy|NCBI|ENSEMBL|FlyBase|WormBase|SGD|MGI|RGD|ZFIN|TAIR|MaizeGDB|Gramene|PlantGDB|Phytozome|JGI|DOI|PubChem|ChEBI|ChEMBL|DrugBank)[:=]\s*([A-Za-z0-9_\-.:]+)\b/gi;
+      /\b(UniProt|SwissProt|TrEMBL|InterPro|Pfam|KEGG|COG|KO|PROSITE|SMART|SUPERFAMILY|PRINTS|PANTHER|TIGRFAM|HAMAP|PIR|PDB|RefSeq|GenBank|EMBL|DDBJ|CDD|OrthoDB|EggNOG|STRING|Reactome|BioCyc|MetaCyc|EcoCyc|ENZYME|BRENDA|ExPASy|NCBI|ENSEMBL|FlyBase|WormBase|SGD|MGI|RGD|ZFIN|TAIR|MaizeGDB|Gramene|PlantGDB|Phytozome|JGI|PubChem|ChEBI|ChEMBL|DrugBank)[:=]\s*([A-Za-z0-9_\-.:]+)\b/gi;
     enhancedValue = enhancedValue.replace(dbXrefPattern, (match, database, id) => {
       let url = '';
       let title = '';
@@ -7582,10 +7696,6 @@ class GenomeBrowser {
         case 'jgi':
           url = `https://genome.jgi.doe.gov/portal/pages/dynamicOrganismDownload.jsf?organism=${id}`;
           title = 'View in JGI';
-          break;
-        case 'doi':
-          url = `https://doi.org/${id}`;
-          title = 'View DOI publication';
           break;
         case 'pubchem':
           url = `https://pubchem.ncbi.nlm.nih.gov/compound/${id}`;

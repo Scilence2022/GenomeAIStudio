@@ -17,7 +17,15 @@ function extractMethod(name) {
 }
 
 function createRenderer() {
-  const body = ['processUnifiedCitations', 'addUnifiedCitation', 'getCitationUrl', 'enhanceGeneAttributeWithLinks']
+  const body = [
+    'processUnifiedCitations',
+    'addUnifiedCitation',
+    'getCitationUrl',
+    'enhanceGeneAttributeWithLinks',
+    'splitAnnotationNoteSections',
+    'renderAnnotationNoteBody',
+    'renderAnnotationNoteSources',
+  ]
     .map(extractMethod)
     .join('\n');
   const Harness = vm.runInNewContext(`(class CitationHarness {
@@ -28,6 +36,7 @@ function createRenderer() {
   return {
     harness,
     render: value => harness.processUnifiedCitations(harness.enhanceGeneAttributeWithLinks(value)),
+    renderNote: value => harness.renderAnnotationNoteBody(value),
   };
 }
 
@@ -59,6 +68,59 @@ describe('Genome annotation note citation rendering', () => {
     expect(html).toContain('<sup class="cits-ref">3</sup>');
     expect(html).not.toContain('pubmed.ncbi.nlm.nih.gov/3');
     expect(harness.citationCollector.size).toBe(0);
+  });
+
+  it('links short legacy PMIDs instead of leaving them as raw text', () => {
+    const { render } = createRenderer();
+    const html = render('described earlier (PMID:28751).');
+
+    expect(html).toContain('https://pubmed.ncbi.nlm.nih.gov/28751/');
+    expect(html).not.toContain('PMID:28751');
+  });
+
+  it('keeps a slash-bearing DOI whole instead of splitting it at the registrant prefix', () => {
+    const { harness, render } = createRenderer();
+    const html = render('see DOI:10.1111/j.1432-1033.1976.tb10182.x. for details');
+
+    expect(html).toContain('https://doi.org/10.1111/j.1432-1033.1976.tb10182.x');
+    // The sentence full stop stays text; the truncated "DOI:10.1111" badge that
+    // left "/j.1432-..." dangling must not come back.
+    expect(html).not.toContain('&gt;DOI:10.1111&lt;');
+    expect(html).not.toContain('/j.1432-1033.1976.tb10182.x.');
+    expect(harness.citationCollector.get('DOI:10.1111/j.1432-1033.1976.tb10182.x')).toBeDefined();
+  });
+
+  it('moves the Supporting sources clause into its own chip row and drops the duplicated provenance sentence', () => {
+    const { harness, renderNote } = createRenderer();
+    const html = renderNote(
+      'Catalyses the first step. Supporting sources: PMID:4887501. PMID:28751. DOI:10.1111/j.1432-1033.1976.tb10182.x. Annotation by Deep Gene Research on August 20, 2026.'
+    );
+
+    expect(html).toContain('gene-annotation-note-sources');
+    expect(html).toContain('Supporting sources (3)');
+    // The narrative keeps the clause out of its prose, and the source badge
+    // already carries the provenance date.
+    expect(html).not.toContain('Supporting sources: PMID');
+    expect(html).not.toContain('Annotation by Deep Gene Research on August 20, 2026.');
+    expect(html).toContain('https://pubmed.ncbi.nlm.nih.gov/28751/');
+    expect(html).toContain('https://doi.org/10.1111/j.1432-1033.1976.tb10182.x');
+    expect(harness.citationCollector.size).toBe(3);
+  });
+
+  it('leaves an unrecognised sources clause in the note body rather than dropping curated text', () => {
+    const { renderNote } = createRenderer();
+    const html = renderNote('Catalyses the first step. Supporting sources: internal curation notes and lab records.');
+
+    expect(html).not.toContain('gene-annotation-note-sources');
+    expect(html).toContain('internal curation notes and lab records.');
+  });
+
+  it('renders an original GenBank note without a bibliography footer', () => {
+    const { renderNote } = createRenderer();
+    const html = renderNote('Original annotation text without citations.');
+
+    expect(html).toContain('<div class="gene-annotation-note-text">Original annotation text without citations.</div>');
+    expect(html).not.toContain('gene-annotation-note-sources');
   });
 
   it('renders inline italics from the note but keeps dangerous markup escaped', () => {
